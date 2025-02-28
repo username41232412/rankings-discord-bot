@@ -1,0 +1,14 @@
+runtime: nodejs20
+service: discord-bot-ranks
+
+instance_class: F1
+
+automatic_scaling:
+  min_instances: 1
+  max_instances: 1
+  min_idle_instances: 1
+
+env_variables:
+  # Environment variables can be set here
+  # DISCORD_TOKEN: "your-token-here"
+  # Or you can upload your .env file alongside the app

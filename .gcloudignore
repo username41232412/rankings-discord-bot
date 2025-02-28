@@ -1,0 +1,14 @@
+# This file specifies files that are *not* uploaded to Google Cloud
+# using gcloud.
+
+.git
+.gitignore
+# .env is NOT ignored here, so it will be uploaded
+.env.example
+node_modules/
+npm-debug.log
+README.md
+
+# Local development configurations and files
+*.log
+.vscode/
