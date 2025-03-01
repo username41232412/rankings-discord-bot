@@ -88,18 +88,18 @@ const ranksChannels = ['1276850074428903435', '948052164226474024'];
 const matchResultsChannels = ['1344789867560833064'];
 const UPDATE_PERIOD = 150; // seconds
 
-// Get ranks from BigQuery
+// Modify the getRanks function in the Discord bot (index.js) to include pastgames field
 async function getRanks() {
     const query = `
-    SELECT name, steamid, elo, timestamp, nationality
+    SELECT name, steamid, elo, timestamp, nationality, pastgames
     FROM (
-        SELECT name, steamid, elo, timestamp, nationality,
+        SELECT name, steamid, elo, timestamp, nationality, pastgames,
         ROW_NUMBER() OVER(PARTITION BY steamid ORDER BY timestamp DESC) as rn
         FROM \`bplrankings.Main.rankings\`
     )
     WHERE rn = 1
     ORDER BY elo DESC
-    LIMIT 30
+    LIMIT 100
     `;
 
     // Execute the query
@@ -111,24 +111,49 @@ async function getRanks() {
 
     let resultString = `The Ranks, as of ${discordTimestamp}.\n`;
 
-    rows.forEach((row, i) => {
-        const prefix = row.nationality ? `${row.nationality}` : '';
-        resultString += `${i + 1}. ${prefix} ${row.name} ${row.elo}\n`;
+    // Get the K-value configuration from the backend
+    let kValueConfig;
+    try {
+        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
+        kValueConfig = configResponse.data;
+    } catch (error) {
+        console.error('Error fetching K-value config:', error);
+        // Default threshold if fetch fails
+        kValueConfig = {
+            thresholds: { newPlayer: 5 }
+        };
+    }
+
+    // Filter out players with fewer games than the threshold
+    const minGames = kValueConfig?.thresholds?.newPlayer || 5;
+
+    // Filter and number the qualified players
+    let rank = 1;
+    rows.forEach((row) => {
+        const pastGames = row.pastgames || 0;
+
+        // Only include players with enough games
+        if (pastGames >= minGames) {
+            const prefix = row.nationality ? `${row.nationality}` : '';
+            resultString += `${rank}. ${prefix} ${row.name} ${row.elo}\n`;
+            rank++;
+        }
     });
 
     resultString += `\nMessage an admin to change your emoji.`;
-    //resultString += `\nWould very much appreciate anyone who wants to help code the ranking project.`;
+    resultString += `\nPlayers with fewer than ${minGames} games are unranked.`;
+    resultString += `\nCheck your rating with /rank steamid: YourSteamID`;
 
     return resultString;
 }
 
-// Get all ranks data
+// Update the getAllRanksData function to include pastgames
 async function getAllRanksData() {
     const query = `
-    SELECT name, steamid, elo, nationality,
-    RANK() OVER(ORDER BY elo DESC) as rank
+    SELECT name, steamid, elo, nationality, pastgames,
+    ROW_NUMBER() OVER(ORDER BY elo DESC) as absolute_rank
     FROM (
-        SELECT name, steamid, elo, nationality,
+        SELECT name, steamid, elo, nationality, pastgames,
         ROW_NUMBER() OVER(PARTITION BY steamid ORDER BY timestamp DESC) as rn
         FROM \`bplrankings.Main.rankings\`
     )
@@ -138,7 +163,40 @@ async function getAllRanksData() {
 
     // Execute the query
     const [rows] = await bigqueryClient.query(query);
-    return rows;
+
+    // Get the K-value configuration from the backend
+    let kValueConfig;
+    try {
+        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
+        kValueConfig = configResponse.data;
+    } catch (error) {
+        console.error('Error fetching K-value config:', error);
+        // Default threshold if fetch fails
+        kValueConfig = {
+            thresholds: { newPlayer: 5 }
+        };
+    }
+
+    // Calculate displayed ranks based on pastgames threshold
+    const minGames = kValueConfig?.thresholds?.newPlayer || 5;
+    let displayRank = 1;
+
+    // Create an array with recalculated ranks
+    const processedRows = rows.map(row => {
+        const pastGames = row.pastgames || 0;
+
+        // For players with enough games, assign a sequential rank
+        // For others, assign -1 to indicate "unranked"
+        const rank = pastGames >= minGames ? displayRank++ : -1;
+
+        return {
+            ...row,
+            rank: rank,
+            absoluteRank: row.absolute_rank
+        };
+    });
+
+    return processedRows;
 }
 
 // Get player rank by Steam ID
@@ -205,6 +263,7 @@ async function updateRanks(channelId) {
 }
 
 // Update nationality in BigQuery
+// Update the updateNationality function in index.js to include pastgames
 async function updateNationality(steamid, newNationality, channelId) {
     console.log(`Trying to switch nationality of ${steamid} to ${newNationality}`);
 
@@ -228,10 +287,10 @@ async function updateNationality(steamid, newNationality, channelId) {
         if (rows.length > 0) {
             const selectedRow = rows[0];
 
-            // Insert query with the updated nationality
+            // Insert query with the updated nationality, preserving pastgames
             const insertQuery = `
-            INSERT INTO \`Main.rankings\` (name, steamid, elo, timestamp, nationality)
-            VALUES (@name, @steamid, @elo, @timestamp, @nationality)
+            INSERT INTO \`Main.rankings\` (name, steamid, elo, timestamp, nationality, pastgames)
+            VALUES (@name, @steamid, @elo, @timestamp, @nationality, @pastgames)
             `;
 
             const insertOptions = {
@@ -241,7 +300,8 @@ async function updateNationality(steamid, newNationality, channelId) {
                     steamid: selectedRow.steamid,
                     elo: selectedRow.elo,
                     timestamp: Math.floor(Date.now() / 1000),
-                    nationality: newNationality.toLowerCase() === "null" ? null : newNationality
+                    nationality: newNationality.toLowerCase() === "null" ? null : newNationality,
+                    pastgames: selectedRow.pastgames || 0  // Preserve pastgames or default to 0
                 }
             };
 
@@ -502,10 +562,32 @@ async function getSteamAvatar(steamId) {
     }
 }
 
-// Update the formatMatchResults function to include K-value and games count
+// Update the formatMatchResults function to use K-value config
 async function formatMatchResults(matchData) {
     if (!matchData || !matchData.teams) {
         return "Error: Invalid match data";
+    }
+
+    // Get the K-value configuration from the backend
+    let kValueConfig;
+    try {
+        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
+        kValueConfig = configResponse.data;
+    } catch (error) {
+        console.error('Error fetching K-value config:', error);
+        // Default descriptions if fetch fails
+        kValueConfig = {
+            descriptions: {
+                newPlayer: "New players (<5 games)",
+                developingPlayer: "Developing players (5-15 games)",
+                establishedPlayer: "Established players (15+ games)"
+            },
+            kValues: {
+                newPlayer: 120,
+                developingPlayer: 60,
+                establishedPlayer: 30
+            }
+        };
     }
 
     const winningTeam = matchData.winning_team;
@@ -565,11 +647,11 @@ async function formatMatchResults(matchData) {
         resultString += "```\n";
     }
 
-    // Add explanation of K-value
+    // Add explanation of K-value using the descriptions from config
     resultString += `\n**About K-Values:**\n`;
-    resultString += `• K=120: New players (<5 games)\n`;
-    resultString += `• K=60: Developing players (5-10 games)\n`;
-    resultString += `• K=30: Established players (10+ games)\n`;
+    resultString += `• K=${kValueConfig.kValues.newPlayer}: ${kValueConfig.descriptions.newPlayer}\n`;
+    resultString += `• K=${kValueConfig.kValues.developingPlayer}: ${kValueConfig.descriptions.developingPlayer}\n`;
+    resultString += `• K=${kValueConfig.kValues.establishedPlayer}: ${kValueConfig.descriptions.establishedPlayer}\n`;
     resultString += `\nHigher K-values cause larger rating changes.`;
 
     return resultString;
@@ -701,7 +783,7 @@ async function setPlayerEloToZero(steamId = null, playerName = null) {
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    // Existing rank command handler...
+    // Update the rank command handler to handle unranked players
     if (interaction.commandName === 'rank') {
         try {
             // Always respond immediately to prevent timeout
@@ -750,8 +832,46 @@ client.on(Events.InteractionCreate, async interaction => {
                 return;
             }
 
+            // Get the K-value configuration to display threshold in the message
+            let kValueConfig;
+            try {
+                const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
+                kValueConfig = configResponse.data;
+            } catch (error) {
+                console.error('Error fetching K-value config:', error);
+                // Default threshold if fetch fails
+                kValueConfig = {
+                    thresholds: { newPlayer: 5 },
+          kValues: { newPlayer: 120, developingPlayer: 60, establishedPlayer: 30 }
+                };
+            }
+
+            // Determine player status
+            const pastGames = playerData.pastgames || 0;
+            const minGames = kValueConfig?.thresholds?.newPlayer || 5;
+            const devGames = kValueConfig?.thresholds?.developingPlayer || 15;
+
+            let playerStatus = "Unranked";
+            let kValue = kValueConfig?.kValues?.newPlayer || 120;
+
+            if (pastGames >= devGames) {
+                playerStatus = "Established Player";
+                kValue = kValueConfig?.kValues?.establishedPlayer || 30;
+            } else if (pastGames >= minGames) {
+                playerStatus = "Developing Player";
+                kValue = kValueConfig?.kValues?.developingPlayer || 60;
+            } else {
+                playerStatus = "New Player (Unranked)";
+                kValue = kValueConfig?.kValues?.newPlayer || 120;
+            }
+
+            // Format the rank display value
+            const rankDisplay = playerData.rank === -1
+            ? "Unranked"
+            : `#${playerData.rank}`;
+
             // Simple text response as a fallback that will always work
-            const simpleResponse = `${playerData.name} is ranked #${playerData.rank} with ${playerData.elo} ELO.`;
+            const simpleResponse = `${playerData.name} is ${rankDisplay} with ${playerData.elo} ELO. (${playerStatus}, ${pastGames} games played)`;
 
             try {
                 // Try to get the Steam avatar
@@ -764,18 +884,23 @@ client.on(Events.InteractionCreate, async interaction => {
 
                 // Create a fancy embed for the player's stats
                 const rankEmbed = {
-                    color: getRankColor(playerData.rank),
+                    color: getRankColor(playerData.absoluteRank),
           title: `${playerData.nationality || ''} ${playerData.name}'s Ranking Stats`,
           description: `Current ranking information for ${playerData.name}`,
           fields: [
               {
                   name: 'Rank',
-          value: `#${playerData.rank}`,
+          value: rankDisplay,
           inline: true,
               },
           {
-              name: 'ELO',
+              name: 'Rating',
           value: `${playerData.elo}`,
+          inline: true,
+          },
+          {
+              name: 'Games Played',
+          value: `${pastGames}`,
           inline: true,
           },
           {
@@ -786,9 +911,18 @@ client.on(Events.InteractionCreate, async interaction => {
           ],
           timestamp: new Date(),
           footer: {
-              text: 'BPL Rankings',
+              text: `BPL Rankings | ${minGames}+ games needed to be ranked`,
           },
                 };
+
+                // Add note for unranked players
+                if (playerData.rank === -1) {
+                    rankEmbed.fields.push({
+                        name: 'Ranking Status',
+                        value: `Need ${minGames - pastGames} more games to be officially ranked.`,
+                        inline: false,
+                    });
+                }
 
                 // Add thumbnail if we have an avatar
                 if (avatarUrl) {
