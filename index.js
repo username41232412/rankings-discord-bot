@@ -404,6 +404,10 @@ const adminCommands = [
     option.setName('rating')
     .setDescription('New rating value to set')
     .setRequired(true))
+    .addIntegerOption(option =>
+    option.setName('pastgames')
+    .setDescription('Number of past games (optional)')
+    .setRequired(false))
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -1172,6 +1176,7 @@ client.on(Events.InteractionCreate, async interaction => {
             // Get the parameters from the command
             const steamId = interaction.options.getString('steamid');
             const newRating = interaction.options.getInteger('rating');
+            const pastGamesOption = interaction.options.getInteger('pastgames');
 
             // Defer reply to buy time for the database operation
             await interaction.deferReply();
@@ -1218,7 +1223,7 @@ client.on(Events.InteractionCreate, async interaction => {
           elo: newRating,
           timestamp: Math.floor(Date.now() / 1000),
           nationality: selectedRow.nationality,
-          pastgames: selectedRow.pastgames || 0
+          pastgames: pastGamesOption !== null ? pastGamesOption : (selectedRow.pastgames || 0)
           },
           // Explicitly specify types for all parameters to handle null values
           types: {
@@ -1233,9 +1238,23 @@ client.on(Events.InteractionCreate, async interaction => {
 
                 const [insertResponse] = await bigqueryClient.query(insertOptions);
 
+                // Determine if pastgames was updated
+                const oldPastGames = selectedRow.pastgames || 0;
+                const newPastGames = pastGamesOption !== null ? pastGamesOption : oldPastGames;
+                const pastGamesUpdated = pastGamesOption !== null;
+
                 // Send success message
+                let successMessage = `✅ Player **${selectedRow.name}** (${steamId}) rating has been changed from ${oldRating} to ${newRating}.`;
+
+                // Add information about pastgames if it was updated
+                if (pastGamesUpdated) {
+                    successMessage += `\nGames played count has been changed from ${oldPastGames} to ${newPastGames}.`;
+                }
+
+                successMessage += `\n\nRanks channels will be updated shortly.`;
+
                 await interaction.editReply({
-                    content: `✅ Player **${selectedRow.name}** (${steamId}) rating has been changed from ${oldRating} to ${newRating}.\n\nRanks channels will be updated shortly.`
+                    content: successMessage
                 });
 
                 // Log the action
@@ -1246,7 +1265,14 @@ client.on(Events.InteractionCreate, async interaction => {
                     try {
                         const channel = await client.channels.fetch(channelId);
                         if (channel) {
-                            await channel.send(`⚠️ **RATING CHANGE**: Player **${selectedRow.name}** (${steamId}) rating has been manually changed from ${oldRating} to ${newRating} by ${interaction.user.tag}`);
+                            let announcementMessage = `⚠️ **RATING CHANGE**: Player **${selectedRow.name}** (${steamId}) rating has been manually changed from ${oldRating} to ${newRating} by ${interaction.user.tag}`;
+
+                            // Add information about pastgames if it was updated
+                            if (pastGamesUpdated) {
+                                announcementMessage += `\nGames played count has been changed from ${oldPastGames} to ${newPastGames}.`;
+                            }
+
+                            await channel.send(announcementMessage);
                         }
                     } catch (error) {
                         console.error(`Error sending rating change announcement to channel ${channelId}:`, error);
