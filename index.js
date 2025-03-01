@@ -145,9 +145,11 @@ async function getRanks() {
         }
     });
 
-    resultString += `\nMessage an admin to change your emoji.`;
-    resultString += `\nPlayers with fewer than ${minGames} games are unranked.`;
-    resultString += `\nCheck your rating with /rank steamid: YourSteamID`;
+    resultString += '\nRanking Information'
+    resultString += '\n• Rankings are calculated from Ranked Games'
+    resultString += `\n• Message an admin to change your emoji.`;
+    resultString += `\n• Players with fewer than ${minGames} games are unranked.`;
+    resultString += `\n• Check your rating with /rank steamid: YourSteamID`;
 
     return resultString;
 }
