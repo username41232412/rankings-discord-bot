@@ -310,6 +310,19 @@ const adminCommands = [
     .addIntegerOption(option =>
     option.setName('default_elo')
     .setDescription('Default ELO value to reset to (default: 2000)')
+    .setRequired(false)),
+
+    // Add the new set_elo command
+    new SlashCommandBuilder()
+    .setName('set_elo_zero')
+    .setDescription('Set a player\'s ELO to 0 (Admin only)')
+    .addStringOption(option =>
+    option.setName('steamid')
+    .setDescription('Steam ID of the player')
+    .setRequired(false))
+    .addStringOption(option =>
+    option.setName('name')
+    .setDescription('Name of the player (partial names work)')
     .setRequired(false))
 ];
 
@@ -612,7 +625,6 @@ async function processUpdateQueue() {
 const ADMIN_ROLE_ID = '1226974606687080598';
 
 // Add a function to reset ranks via backend
-// Add a function to reset ranks via backend
 async function resetRanksViaBackend(defaultElo = 2000) {
     try {
         // Use a special internal endpoint with a shared secret in the headers
@@ -641,6 +653,44 @@ async function resetRanksViaBackend(defaultElo = 2000) {
         return {
             success: false,
             message: error.response?.data || error.message
+        };
+    }
+}
+
+// Add this function near the resetRanksViaBackend function in index.js
+async function setPlayerEloToZero(steamId = null, playerName = null) {
+    try {
+        // Use a special internal endpoint with a shared secret in the headers
+        const backendUrl = 'https://bplrankings.uc.r.appspot.com/internal/set-elo-zero';
+
+        // Use a shared secret from environment variables
+        const botSecret = process.env.BOT_INTERNAL_SECRET;
+
+        if (!botSecret) {
+            throw new Error('BOT_INTERNAL_SECRET not configured in environment variables');
+        }
+
+        const response = await axios.post(
+            backendUrl,
+            {
+                steamid: steamId,
+                name: playerName
+            },
+            { headers: { 'X-Bot-Secret': botSecret } }
+        );
+
+        // The backend returns plain text with status code
+        return {
+            success: response.status === 200,
+            message: response.data,
+            playerData: response.data.playerData || null
+        };
+    } catch (error) {
+        console.error('Error calling set elo zero endpoint:', error);
+        return {
+            success: false,
+            message: error.response?.data || error.message,
+            playerData: null
         };
     }
 }
@@ -833,6 +883,106 @@ client.on(Events.InteractionCreate, async interaction => {
             } else {
                 await interaction.reply({
                     content: "An error occurred while resetting ranks. Check the server logs for details.",
+                    ephemeral: true
+                });
+            }
+        }
+    }
+    // Set ELO to zero command handler
+    if (interaction.commandName === 'set_elo_zero') {
+        try {
+            // Double-check that user has the admin role for extra security
+            const member = interaction.member;
+            const hasAdminRole = member && member.roles && member.roles.cache.has(ADMIN_ROLE_ID);
+
+            if (!hasAdminRole) {
+                await interaction.reply({
+                    content: "You need the admin role to use this command.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Get the parameters from the command
+            const steamId = interaction.options.getString('steamid');
+            const name = interaction.options.getString('name');
+
+            // Validate input - need at least one parameter
+            if (!steamId && !name) {
+                await interaction.reply({
+                    content: "Please provide either a Steam ID or a player name.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Defer reply to buy time for the API call
+            await interaction.deferReply();
+
+            // First find the player if name is provided
+            let targetSteamId = steamId;
+            let targetName = name;
+            let playerData = null;
+
+            if (!steamId && name) {
+                // Find player by name
+                const allRanks = await getAllRanksData();
+                playerData = allRanks.find(player =>
+                player.name.toLowerCase().includes(name.toLowerCase())
+                );
+
+                if (!playerData) {
+                    await interaction.editReply(`Could not find a player with name matching "${name}" in the rankings.`);
+                    return;
+                }
+
+                targetSteamId = playerData.steamid;
+                targetName = playerData.name;
+            }
+
+            // Call our backend function
+            const result = await setPlayerEloToZero(targetSteamId, targetName);
+
+            if (result.success) {
+                // Send success message
+                await interaction.editReply({
+                    content: `⚠️ Player **${result.playerData?.name || targetName}** (${result.playerData?.steamid || targetSteamId}) ELO has been set to 0.\n\nRanks channels will be updated shortly.`
+                });
+
+                // Log the action
+                console.log(`ELO set to 0 for player ${result.playerData?.name || targetName} (${result.playerData?.steamid || targetSteamId}) by ${interaction.user.tag} (${interaction.user.id})`);
+
+                // Announce in admin channels
+                for (const channelId of configChannels) {
+                    try {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) {
+                            await channel.send(`⚠️ **ELO RESET**: Player **${result.playerData?.name || targetName}** (${result.playerData?.steamid || targetSteamId}) ELO has been set to 0 by ${interaction.user.tag}`);
+                        }
+                    } catch (error) {
+                        console.error(`Error sending reset announcement to channel ${channelId}:`, error);
+                    }
+                }
+
+                // Update all ranks channels
+                for (const channelId of ranksChannels) {
+                    await updateRanks(channelId);
+                }
+            } else {
+                await interaction.editReply(`Error: ${result.message || 'Failed to set player ELO to 0'}`);
+            }
+
+        } catch (error) {
+            console.error("Error in set_elo_zero command:", error);
+
+            // Check if we've already replied
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply({
+                    content: "An error occurred while setting player ELO to 0. Check the server logs for details."
+                });
+            } else {
+                await interaction.reply({
+                    content: "An error occurred while setting player ELO to 0. Check the server logs for details.",
                     ephemeral: true
                 });
             }
