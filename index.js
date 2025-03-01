@@ -2,6 +2,11 @@
 const axios = require('axios');
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+
+// for the confirmation button for /reset_ranks
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const pendingResetConfirmations = new Map();
+
 const fs = require('fs');
 const path = require('path');
 const { BigQuery } = require('@google-cloud/bigquery');
@@ -971,57 +976,69 @@ client.on(Events.InteractionCreate, async interaction => {
             // Get the default ELO option
             const defaultElo = interaction.options.getInteger('default_elo') || 2000;
 
-            // Defer reply to buy time for the API call
-            await interaction.deferReply();
+            // Create confirmation buttons
+            const confirmButton = new ButtonBuilder()
+            .setCustomId(`confirm_reset_${interaction.user.id}_${defaultElo}`)
+            .setLabel('Confirm Reset')
+            .setStyle(ButtonStyle.Danger);
 
-            // Call our backend function
-            const result = await resetRanksViaBackend(defaultElo);
+            const cancelButton = new ButtonBuilder()
+            .setCustomId(`cancel_reset_${interaction.user.id}`)
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Secondary);
 
-            if (result.success) {
-                // Send success message
-                await interaction.editReply({
-                    content: `🔄 All player ranks have been reset to ${defaultElo} ELO with 0 past games.\n\nRanks channels will be updated shortly.`
-                });
+            const row = new ActionRowBuilder()
+            .addComponents(confirmButton, cancelButton);
 
-                // Log the action
-                console.log(`Ranks reset to ${defaultElo} by ${interaction.user.tag} (${interaction.user.id})`);
+            // Send confirmation message with buttons
+            await interaction.reply({
+                content: `⚠️ **WARNING**: You are about to reset ALL player ranks to ${defaultElo} ELO.\n\nThis action cannot be undone and will affect all players. Are you sure you want to proceed?`,
+                components: [row],
+                ephemeral: false
+            });
 
-                // Announce in admin channels
-                for (const channelId of configChannels) {
+            // Store the confirmation request with a 60-second timeout
+            pendingResetConfirmations.set(interaction.user.id, {
+                defaultElo: defaultElo,
+                    messageId: (await interaction.fetchReply()).id,
+                                          channelId: interaction.channelId,
+                                          timestamp: Date.now(),
+                                          userId: interaction.user.id
+            });
+
+            // Set timeout to expire the confirmation after 60 seconds
+            setTimeout(() => {
+                const pendingRequest = pendingResetConfirmations.get(interaction.user.id);
+                if (pendingRequest) {
+                    pendingResetConfirmations.delete(interaction.user.id);
+
+                    // Try to edit the message to indicate expiration
                     try {
-                        const channel = await client.channels.fetch(channelId);
+                        const channel = client.channels.cache.get(pendingRequest.channelId);
                         if (channel) {
-                            await channel.send(`🔄 **RANKS RESET**: All player ranks have been reset to ${defaultElo} by ${interaction.user.tag}`);
+                            channel.messages.fetch(pendingRequest.messageId)
+                            .then(message => {
+                                message.edit({
+                                    content: `⏱️ Reset confirmation has expired.`,
+                                    components: []
+                                }).catch(console.error);
+                            }).catch(console.error);
                         }
                     } catch (error) {
-                        console.error(`Error sending reset announcement to channel ${channelId}:`, error);
+                        console.error("Error updating expired confirmation message:", error);
                     }
                 }
-
-                // Update all ranks channels
-                for (const channelId of ranksChannels) {
-                    await updateRanks(channelId);
-                }
-            } else {
-                await interaction.editReply(`Error: ${result.message || 'Failed to reset ranks'}`);
-            }
+            }, 60000); // 60 seconds
 
         } catch (error) {
             console.error("Error in reset_ranks command:", error);
-
-            // Check if we've already replied
-            if (interaction.deferred || interaction.replied) {
-                await interaction.editReply({
-                    content: "An error occurred while resetting ranks. Check the server logs for details."
-                });
-            } else {
-                await interaction.reply({
-                    content: "An error occurred while resetting ranks. Check the server logs for details.",
-                    ephemeral: true
-                });
-            }
+            await interaction.reply({
+                content: "An error occurred while processing the reset command.",
+                ephemeral: true
+            });
         }
     }
+
     // Set ELO to zero command handler
     if (interaction.commandName === 'set_elo_zero') {
         try {
@@ -1135,6 +1152,129 @@ client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
     if (newRole.id === ADMIN_ROLE_ID) {
         console.log(`Admin role updated in guild ${newRole.guild.name}`);
         await registerGuildCommands(newRole.guild);
+    }
+});
+
+
+// Add a handler for button interactions in the InteractionCreate event
+client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isButton()) return;
+
+    const customId = interaction.customId;
+
+    // Handle reset confirmation buttons
+    if (customId.startsWith('confirm_reset_')) {
+        // Extract user ID and default ELO from the custom ID
+        const parts = customId.split('_');
+        const userId = parts[2];
+        const defaultElo = parseInt(parts[3], 10);
+
+        // Check if this is the user who initiated the reset
+        if (interaction.user.id !== userId) {
+            await interaction.reply({
+                content: "Only the user who initiated the reset can confirm it.",
+                ephemeral: true
+            });
+            return;
+        }
+
+        // Check if we have a pending reset for this user
+        const pendingRequest = pendingResetConfirmations.get(userId);
+        if (!pendingRequest) {
+            await interaction.reply({
+                content: "This reset confirmation has expired or was already processed.",
+                ephemeral: true
+            });
+            return;
+        }
+
+        // Remove the pending request
+        pendingResetConfirmations.delete(userId);
+
+        // Update the message to indicate processing
+        await interaction.update({
+            content: "Processing reset... Please wait.",
+            components: []
+        });
+
+        try {
+            // Call our backend function
+            const result = await resetRanksViaBackend(defaultElo);
+
+            // fake calling the backend function
+            // const result = {
+            //     success: true,
+            //     message: "Reset command is currently disabled. This is just a simulation."
+            // };
+
+            if (result.success) {
+                // Send success message
+                await interaction.editReply({
+                    content: `🔄 All player ranks have been reset to ${defaultElo} ELO with 0 past games.\n\nRanks channels will be updated shortly.`
+                });
+
+                // Log the action
+                console.log(`Ranks reset to ${defaultElo} by ${interaction.user.tag} (${interaction.user.id})`);
+
+                // Announce in admin channels
+                for (const channelId of configChannels) {
+                    try {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) {
+                            await channel.send(`🔄 **RANKS RESET**: All player ranks have been reset to ${defaultElo} by ${interaction.user.tag}`);
+                        }
+                    } catch (error) {
+                        console.error(`Error sending reset announcement to channel ${channelId}:`, error);
+                    }
+                }
+
+                // Update all ranks channels
+                for (const channelId of ranksChannels) {
+                    await updateRanks(channelId);
+                }
+            } else {
+                await interaction.editReply(`Error: ${result.message || 'Failed to reset ranks'}`);
+            }
+        } catch (error) {
+            console.error("Error processing reset after confirmation:", error);
+            await interaction.editReply({
+                content: "An error occurred while resetting ranks. Check the server logs for details."
+            });
+        }
+    }
+
+    // Handle cancel button
+    else if (customId.startsWith('cancel_reset_')) {
+        // Extract user ID from the custom ID
+        const userId = customId.split('_')[2];
+
+        // Check if this is the user who initiated the reset
+        if (interaction.user.id !== userId) {
+            await interaction.reply({
+                content: "Only the user who initiated the reset can cancel it.",
+                ephemeral: true
+            });
+            return;
+        }
+
+        // Check if we have a pending reset for this user
+        const pendingRequest = pendingResetConfirmations.get(userId);
+        if (!pendingRequest) {
+            await interaction.reply({
+                content: "This reset confirmation has expired or was already processed.",
+                ephemeral: true
+            });
+            return;
+        }
+
+        // Remove the pending request
+        pendingResetConfirmations.delete(userId);
+
+        // Update the message to indicate cancellation
+        await interaction.update({
+            content: "❌ Reset cancelled.",
+            components: []
+        });
     }
 });
 
