@@ -390,7 +390,20 @@ const adminCommands = [
     .addStringOption(option =>
     option.setName('name')
     .setDescription('Name of the player (partial names work)')
-    .setRequired(false))
+    .setRequired(false)),
+
+    // Add the new set_rating command
+    new SlashCommandBuilder()
+    .setName('set_rating')
+    .setDescription('Set a player\'s rating to a specific value (Admin only)')
+    .addStringOption(option =>
+    option.setName('steamid')
+    .setDescription('Steam ID of the player')
+    .setRequired(true))
+    .addIntegerOption(option =>
+    option.setName('rating')
+    .setDescription('New rating value to set')
+    .setRequired(true))
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -1136,6 +1149,131 @@ client.on(Events.InteractionCreate, async interaction => {
             } else {
                 await interaction.reply({
                     content: "An error occurred while setting player ELO to 0. Check the server logs for details.",
+                    ephemeral: true
+                });
+            }
+        }
+    }
+
+    if (interaction.commandName === 'set_rating') {
+        try {
+            // Double-check that user has the admin role for extra security
+            const member = interaction.member;
+            const hasAdminRole = member && member.roles && member.roles.cache.has(ADMIN_ROLE_ID);
+
+            if (!hasAdminRole) {
+                await interaction.reply({
+                    content: "You need the admin role to use this command.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Get the parameters from the command
+            const steamId = interaction.options.getString('steamid');
+            const newRating = interaction.options.getInteger('rating');
+
+            // Defer reply to buy time for the database operation
+            await interaction.deferReply();
+
+            try {
+                // First query to get the existing record - with explicit type for steamid
+                const selectQuery = `
+                SELECT *
+                FROM \`Main.rankings\`
+                WHERE steamid = @steamid
+                ORDER BY timestamp DESC
+                LIMIT 1
+                `;
+
+                const selectOptions = {
+                    query: selectQuery,
+          params: { steamid: steamId },
+          types: { steamid: 'STRING' }
+                };
+
+                const [rows] = await bigqueryClient.query(selectOptions);
+
+                if (rows.length === 0) {
+                    await interaction.editReply({
+                        content: `Error: No player found with Steam ID ${steamId}`
+                    });
+                    return;
+                }
+
+                const selectedRow = rows[0];
+                const oldRating = selectedRow.elo;
+
+                // Insert query with the updated rating - with explicit types for all parameters
+                const insertQuery = `
+                INSERT INTO \`Main.rankings\` (name, steamid, elo, timestamp, nationality, pastgames)
+                VALUES (@name, @steamid, @elo, @timestamp, @nationality, @pastgames)
+                `;
+
+                const insertOptions = {
+                    query: insertQuery,
+          params: {
+              name: selectedRow.name,
+          steamid: selectedRow.steamid,
+          elo: newRating,
+          timestamp: Math.floor(Date.now() / 1000),
+          nationality: selectedRow.nationality,
+          pastgames: selectedRow.pastgames || 0
+          },
+          // Explicitly specify types for all parameters to handle null values
+          types: {
+              name: 'STRING',
+          steamid: 'STRING',
+          elo: 'INT64',
+          timestamp: 'INT64',
+          nationality: 'STRING',
+          pastgames: 'INT64'
+          }
+                };
+
+                const [insertResponse] = await bigqueryClient.query(insertOptions);
+
+                // Send success message
+                await interaction.editReply({
+                    content: `✅ Player **${selectedRow.name}** (${steamId}) rating has been changed from ${oldRating} to ${newRating}.\n\nRanks channels will be updated shortly.`
+                });
+
+                // Log the action
+                console.log(`Rating changed for player ${selectedRow.name} (${steamId}) from ${oldRating} to ${newRating} by ${interaction.user.tag} (${interaction.user.id})`);
+
+                // Announce in admin channels
+                for (const channelId of configChannels) {
+                    try {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) {
+                            await channel.send(`⚠️ **RATING CHANGE**: Player **${selectedRow.name}** (${steamId}) rating has been manually changed from ${oldRating} to ${newRating} by ${interaction.user.tag}`);
+                        }
+                    } catch (error) {
+                        console.error(`Error sending rating change announcement to channel ${channelId}:`, error);
+                    }
+                }
+
+                // Update all ranks channels
+                for (const channelId of ranksChannels) {
+                    await updateRanks(channelId);
+                }
+            } catch (error) {
+                console.error("Error in database operation:", error);
+                await interaction.editReply({
+                    content: `Error: ${error.message || 'Failed to set player rating'}`
+                });
+            }
+        } catch (error) {
+            console.error("Error in set_rating command:", error);
+
+            // Check if we've already replied
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply({
+                    content: "An error occurred while setting player rating. Check the server logs for details."
+                });
+            } else {
+                await interaction.reply({
+                    content: "An error occurred while setting player rating. Check the server logs for details.",
                     ephemeral: true
                 });
             }
