@@ -294,6 +294,14 @@ async function updateNationality(steamid, newNationality, channelId) {
                     timestamp: Math.floor(Date.now() / 1000),
                     nationality: newNationality.toLowerCase() === "null" ? null : newNationality,
                     pastgames: selectedRow.pastgames || 0  // Preserve pastgames or default to 0
+                },
+                types: {
+                    name: 'STRING',
+                    steamid: 'STRING',
+                    elo: 'INT64',
+                    timestamp: 'INT64',
+                    nationality: 'STRING',
+                    pastgames: 'INT64'
                 }
             };
 
