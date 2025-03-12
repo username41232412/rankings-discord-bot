@@ -92,6 +92,17 @@ const configChannels = ['1246103921114746890', '1246088196475981866', '127150492
 const ranksChannels = ['1276850074428903435', '948052164226474024'];
 const matchResultsChannels = ['1344789867560833064'];
 const UPDATE_PERIOD = 150; // seconds
+// K-value configuration cache
+let cachedKValueConfig = {
+    thresholds: { newPlayer: 5, developingPlayer: 15 },
+    kValues: { newPlayer: 120, developingPlayer: 60, establishedPlayer: 30 },
+    descriptions: {
+        newPlayer: "New players (<5 games)",
+        developingPlayer: "Developing players (5-15 games)",
+        establishedPlayer: "Established players (15+ games)"
+    }
+};
+
 
 // Modify the getRanks function in the Discord bot (index.js) to include pastgames field
 async function getRanks() {
@@ -116,21 +127,8 @@ async function getRanks() {
 
     let resultString = `The Ranks, as of ${discordTimestamp}.\n`;
 
-    // Get the K-value configuration from the backend
-    let kValueConfig;
-    try {
-        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
-        kValueConfig = configResponse.data;
-    } catch (error) {
-        console.error('Error fetching K-value config:', error);
-        // Default threshold if fetch fails
-        kValueConfig = {
-            thresholds: { newPlayer: 5 }
-        };
-    }
-
-    // Filter out players with fewer games than the threshold
-    const minGames = kValueConfig?.thresholds?.newPlayer || 5;
+    // Use the cached K-value config instead of fetching it every time
+    const minGames = cachedKValueConfig?.thresholds?.newPlayer || 5;
 
     // Filter and number the qualified players
     let rank = 1;
@@ -171,21 +169,8 @@ async function getAllRanksData() {
     // Execute the query
     const [rows] = await bigqueryClient.query(query);
 
-    // Get the K-value configuration from the backend
-    let kValueConfig;
-    try {
-        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
-        kValueConfig = configResponse.data;
-    } catch (error) {
-        console.error('Error fetching K-value config:', error);
-        // Default threshold if fetch fails
-        kValueConfig = {
-            thresholds: { newPlayer: 5 }
-        };
-    }
-
-    // Calculate displayed ranks based on pastgames threshold
-    const minGames = kValueConfig?.thresholds?.newPlayer || 5;
+    // Use the cached K-value config instead of fetching it every time
+    const minGames = cachedKValueConfig?.thresholds?.newPlayer || 5;
     let displayRank = 1;
 
     // Create an array with recalculated ranks
@@ -469,11 +454,14 @@ client.on(Events.MessageCreate, async (message) => {
 
         // Handle update command
         if (content.startsWith('update now')) {
-            // Update all ranks channels instead of the config channel
+            // Refresh the K-value configuration
+            await fetchKValueConfig();
+
+            // Update all ranks channels
             for (const ranksChannelId of ranksChannels) {
                 await updateRanks(ranksChannelId);
             }
-            await message.channel.send('Update made in all ranks channels.');
+            await message.channel.send('K-value config refreshed and update made in all ranks channels.');
         }
 
         // Handle nationality change command
@@ -505,6 +493,9 @@ function getRankColor(rank) {
 // Modify the ClientReady event to process queued updates after initialization
 client.once(Events.ClientReady, async (readyClient) => {
     console.log(`Ready! Logged in as ${readyClient.user.tag}`);
+
+    // Fetch the K-value configuration on startup
+    await fetchKValueConfig();
 
     // Register global commands
     await registerGlobalCommands();
@@ -592,27 +583,8 @@ async function formatMatchResults(matchData) {
         return "Error: Invalid match data";
     }
 
-    // Get the K-value configuration from the backend
-    let kValueConfig;
-    try {
-        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
-        kValueConfig = configResponse.data;
-    } catch (error) {
-        console.error('Error fetching K-value config:', error);
-        // Default descriptions if fetch fails
-        kValueConfig = {
-            descriptions: {
-                newPlayer: "New players (<5 games)",
-                developingPlayer: "Developing players (5-15 games)",
-                establishedPlayer: "Established players (15+ games)"
-            },
-            kValues: {
-                newPlayer: 120,
-                developingPlayer: 60,
-                establishedPlayer: 30
-            }
-        };
-    }
+    // Use the cached K-value config instead of fetching it every time
+    const kValueConfig = cachedKValueConfig;
 
     const winningTeam = matchData.winning_team;
     const timestamp = matchData.timestamp ? `<t:${matchData.timestamp}:F>` : "Unknown time";
@@ -856,19 +828,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 return;
             }
 
-            // Get the K-value configuration to display threshold in the message
-            let kValueConfig;
-            try {
-                const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
-                kValueConfig = configResponse.data;
-            } catch (error) {
-                console.error('Error fetching K-value config:', error);
-                // Default threshold if fetch fails
-                kValueConfig = {
-                    thresholds: { newPlayer: 5 },
-          kValues: { newPlayer: 120, developingPlayer: 60, establishedPlayer: 30 }
-                };
-            }
+            // Use the cached K-value config
+            const kValueConfig = cachedKValueConfig;
 
             // Determine player status
             const pastGames = playerData.pastgames || 0;
@@ -1443,6 +1404,21 @@ client.on(Events.InteractionCreate, async interaction => {
         });
     }
 });
+
+// Function to fetch the K-value configuration from the backend
+async function fetchKValueConfig() {
+    try {
+        console.log('Fetching K-value configuration from backend');
+        const configResponse = await axios.get('https://bplrankings.uc.r.appspot.com/api/k-value-config');
+        cachedKValueConfig = configResponse.data;
+        console.log('K-value configuration updated successfully');
+        return cachedKValueConfig;
+    } catch (error) {
+        console.error('Error fetching K-value config:', error);
+        // Return the cached config if the fetch fails
+        return cachedKValueConfig;
+    }
+}
 
 // Login to Discord with your token from .env
 client.login(process.env.DISCORD_TOKEN);
