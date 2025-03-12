@@ -147,6 +147,7 @@ async function getRanks() {
     resultString += '\n• Rankings are calculated from Ranked Games'
     resultString += `\n• Message an admin to change your emoji.`;
     resultString += `\n• Players with fewer than ${minGames} games are unranked.`;
+    resultString += `\n• Rating can't go below 1500.`;
     resultString += `\n• Check your rating with /rank steamid: YourSteamID`;
 
     return resultString;
@@ -888,7 +889,7 @@ client.on(Events.InteractionCreate, async interaction => {
               },
           {
               name: 'Rating',
-          value: `${playerData.elo}`,
+          value: playerData.elo === 1500 ? `${playerData.elo} (bottom)` : `${playerData.elo}`,
           inline: true,
           },
           {
@@ -904,7 +905,7 @@ client.on(Events.InteractionCreate, async interaction => {
           ],
           timestamp: new Date(),
           footer: {
-              text: `BPL Rankings | ${minGames}+ games needed to be ranked`,
+              text: `BPL Rankings | ${minGames}+ games needed to be ranked\nRating will never drop below 1500`,
           },
                 };
 
